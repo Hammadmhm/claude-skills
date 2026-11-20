@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF Integrity Checker</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <div>
+        <h1>PDF Integrity Checker</h1>
+        <p class="sub">Plagiarism + AI-writing screening with automatic rejection</p>
+      </div>
+      <div class="rule" id="rule">Auto-reject above <strong>30%</strong></div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card upload">
+      <label class="drop" id="drop" for="file-input">
+        <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden>
+        <span class="drop-title">Drop PDFs here or click to choose</span>
+        <span class="drop-hint" id="drop-hint">Hundreds of files at once are fine — they upload in batches and are checked in parallel.</span>
+      </label>
+      <div class="upload-row">
+        <fieldset class="seg" aria-label="Upload type">
+          <label><input type="radio" name="kind" value="submission" checked> Submissions <span class="muted">(checked &amp; decided)</span></label>
+          <label><input type="radio" name="kind" value="reference"> Reference sources <span class="muted">(compared against, never decided)</span></label>
+        </fieldset>
+      </div>
+      <div class="progress" id="progress" hidden>
+        <div class="bar"><div class="fill" id="progress-fill"></div></div>
+        <div class="progress-text" id="progress-text"></div>
+      </div>
+      <ul class="upload-errors" id="upload-errors"></ul>
+    </section>
+
+    <section class="stats" id="stats">
+      <div class="stat"><span class="n" id="s-total">0</span><span class="l">Submissions</span></div>
+      <div class="stat working"><span class="n" id="s-working">0</span><span class="l">In progress</span></div>
+      <div class="stat ok"><span class="n" id="s-accepted">0</span><span class="l">Accepted</span></div>
+      <div class="stat bad"><span class="n" id="s-rejected">0</span><span class="l">Rejected</span></div>
+      <div class="stat warn"><span class="n" id="s-review">0</span><span class="l">Needs review / error</span></div>
+      <div class="stat"><span class="n" id="s-refs">0</span><span class="l">Reference sources</span></div>
+    </section>
+
+    <section class="card">
+      <div class="toolbar">
+        <div class="tabs" id="tabs" role="tablist">
+          <button data-status="" class="active">All</button>
+          <button data-status="rejected">Rejected</button>
+          <button data-status="accepted">Accepted</button>
+          <button data-status="needs_review">Needs review</button>
+          <button data-status="error">Errors</button>
+          <button data-status="processing">In progress</button>
+          <button data-kind="reference">References</button>
+        </div>
+        <div class="toolbar-right">
+          <input type="search" id="search" placeholder="Search filename…">
+          <a class="btn" href="/api/export.csv">Export CSV</a>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>File</th><th>Status</th><th class="num">Plagiarism</th><th class="num">AI</th><th class="num">Pages</th><th>Uploaded</th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p class="empty" id="empty" hidden>No documents yet.</p>
+      </div>
+      <div class="pager">
+        <button class="btn" id="prev">← Prev</button>
+        <span id="page-info"></span>
+        <button class="btn" id="next">Next →</button>
+      </div>
+    </section>
+
+    <p class="disclaimer">
+      AI-writing scores are probabilistic estimates and can be wrong — especially for non-native English writers,
+      formulaic genres and short texts. Use <em>Override</em> to correct a decision after human review.
+    </p>
+  </main>
+
+  <dialog id="detail">
+    <form method="dialog" class="dlg-head">
+      <h2 id="d-title"></h2>
+      <button class="icon" aria-label="Close">✕</button>
+    </form>
+    <div id="d-body"></div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

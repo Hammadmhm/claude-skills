@@ -44,6 +44,7 @@ EXCLUDED_TOP_LEVEL = {
     ".vibe",
     "docs",
     "audit",
+    "apps",  # standalone web apps, not skill packages
     "node_modules",
     ".github",
     ".claude",

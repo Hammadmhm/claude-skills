@@ -36,7 +36,7 @@ TIMEOUT_SECONDS = 15
 # Directory names pruned anywhere in the walk.
 EXCLUDE_DIRS = {
     ".git", ".codex", ".gemini", ".hermes", ".vibe", "docs", "audit",
-    "node_modules", "integrations", "eval-workspace", "site",
+    "node_modules", "integrations", "apps", "eval-workspace", "site",
     "__pycache__", ".venv", "venv",
 }
 

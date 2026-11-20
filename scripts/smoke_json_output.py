@@ -44,7 +44,7 @@ TIMEOUT_SECONDS = 20
 # Reuse the same exclusion set + exceptions file as the --help gate.
 EXCLUDE_DIRS = {
     ".git", ".codex", ".gemini", ".hermes", ".vibe", "docs", "audit",
-    "node_modules", "integrations", "eval-workspace", "site",
+    "node_modules", "integrations", "apps", "eval-workspace", "site",
     "__pycache__", ".venv", "venv",
 }
 EXCEPTIONS_FILE = os.path.join(REPO_ROOT, "scripts", "smoke_exceptions.txt")

@@ -27,7 +27,7 @@ import sys
 
 EXCLUDED_DIRS = {
     ".git", ".codex", ".gemini", ".hermes", ".vibe", "docs", "audit",
-    "node_modules", ".github", ".claude", ".claude-plugin",
+    "node_modules", ".github", ".claude", ".claude-plugin", "apps",
 }
 
 # Token-style paths anchored on a canonical content dir, with a known extension.
