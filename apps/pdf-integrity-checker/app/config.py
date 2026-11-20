@@ -71,6 +71,27 @@ class Settings:
     ai_detector_score_scale: float = field(default_factory=lambda: _float("AI_DETECTOR_SCORE_SCALE", 1.0))
     ai_detector_max_chars: int = field(default_factory=lambda: _int("AI_DETECTOR_MAX_CHARS", 50000))
 
+    # Internet plagiarism search: "off", "brave", "serper" or "searxng".
+    web_search: str = field(default_factory=lambda: os.getenv("WEB_SEARCH", "off").strip().lower())
+    web_search_api_key: str = field(default_factory=lambda: os.getenv("WEB_SEARCH_API_KEY", ""))
+    searxng_url: str = field(default_factory=lambda: os.getenv("SEARXNG_URL", ""))
+    brave_api_url: str = field(
+        default_factory=lambda: os.getenv("BRAVE_API_URL", "https://api.search.brave.com/res/v1/web/search"))
+    serper_api_url: str = field(default_factory=lambda: os.getenv("SERPER_API_URL", "https://google.serper.dev/search"))
+    web_queries_per_doc: int = field(default_factory=lambda: _int("WEB_QUERIES_PER_DOC", 8))
+    web_results_per_query: int = field(default_factory=lambda: _int("WEB_RESULTS_PER_QUERY", 10))
+    web_max_pages_per_doc: int = field(default_factory=lambda: _int("WEB_MAX_PAGES_PER_DOC", 5))
+    web_search_qps: float = field(default_factory=lambda: _float("WEB_SEARCH_QPS", 1.0))
+    web_concurrency: int = field(default_factory=lambda: _int("WEB_CONCURRENCY", 8))
+    web_fetch_timeout_s: int = field(default_factory=lambda: _int("WEB_FETCH_TIMEOUT_S", 15))
+    web_fetch_max_mb: int = field(default_factory=lambda: _int("WEB_FETCH_MAX_MB", 10))
+    # A submission goes to needs_review when more than this share of its
+    # web queries fail (quota exhausted, provider down, ...).
+    web_max_failed_share: float = field(default_factory=lambda: _float("WEB_MAX_FAILED_SHARE", 0.5))
+    # Only for testing against local mock servers. Never enable in production:
+    # it lets search results point the server at internal addresses.
+    web_allow_private_hosts: bool = field(default_factory=lambda: _bool("WEB_ALLOW_PRIVATE_HOSTS", False))
+
     # Optional HTTP Basic auth for the whole site. Leave unset to disable.
     app_username: str = field(default_factory=lambda: os.getenv("APP_USERNAME", "admin"))
     app_password: str = field(default_factory=lambda: os.getenv("APP_PASSWORD", ""))
@@ -83,9 +104,14 @@ class Settings:
     def db_path(self) -> Path:
         return self.data_dir / "integrity.sqlite3"
 
+    @property
+    def web_enabled(self) -> bool:
+        return self.web_search not in ("", "off", "none", "false", "0")
+
     def analysis_options(self) -> dict:
         """The picklable subset handed to worker processes."""
         return {
+            "web_queries": self.web_queries_per_doc if self.web_enabled else 0,
             "min_words": self.min_words,
             "shingle_k": self.shingle_k,
             "winnow_w": self.winnow_w,

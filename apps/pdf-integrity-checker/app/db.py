@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS documents (
     stored_path     TEXT NOT NULL,
     sha256          TEXT NOT NULL,
     size_bytes      INTEGER NOT NULL,
-    kind            TEXT NOT NULL DEFAULT 'submission',  -- submission | reference
+    kind            TEXT NOT NULL DEFAULT 'submission',  -- submission | reference | web
     status          TEXT NOT NULL DEFAULT 'queued',      -- queued | processing | accepted | rejected | needs_review | error | indexed
     decision_source TEXT,                                -- auto | manual
     plagiarism_pct  REAL,
@@ -31,6 +31,14 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
 CREATE INDEX IF NOT EXISTS idx_documents_sha ON documents(sha256);
 
+CREATE TABLE IF NOT EXISTS web_queries (
+    provider   TEXT NOT NULL,
+    query      TEXT NOT NULL,
+    results    TEXT NOT NULL,  -- JSON list of {url, title, snippet}
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (provider, query)
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS fingerprints (
     hash   INTEGER NOT NULL,
     doc_id INTEGER NOT NULL,
@@ -41,8 +49,11 @@ CREATE INDEX IF NOT EXISTS idx_fp_doc ON fingerprints(doc_id);
 
 PUBLIC_COLUMNS = (
     "id, filename, sha256, size_bytes, kind, status, decision_source, plagiarism_pct, "
-    "ai_pct, pages, words, reasons, error, note, created_at, processed_at"
+    "ai_pct, pages, words, reasons, error, note, created_at, processed_at, url, stage"
 )
+
+# Columns added after the first release; created on startup if missing.
+MIGRATIONS = {"url": "TEXT", "stage": "TEXT"}
 
 
 def now() -> str:
@@ -53,8 +64,13 @@ class Database:
     def __init__(self, path: str):
         self.path = path
         self._local = threading.local()
-        with self.conn() as c:
-            c.executescript(SCHEMA)
+        c = self.conn()
+        c.executescript(SCHEMA)
+        have = {r["name"] for r in c.execute("PRAGMA table_info(documents)")}
+        for col, typ in MIGRATIONS.items():
+            if col not in have:
+                c.execute(f"ALTER TABLE documents ADD COLUMN {col} {typ}")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_url ON documents(url) WHERE url IS NOT NULL")
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "conn", None)
@@ -98,6 +114,8 @@ class Database:
         if kind:
             where.append("kind = ?")
             args.append(kind)
+        else:
+            where.append("kind != 'web'")  # web pages are listed only on request
         if q:
             where.append("filename LIKE ?")
             args.append(f"%{q}%")
@@ -111,17 +129,21 @@ class Database:
         return [_decode(r) for r in rows], int(total)
 
     def all_for_export(self) -> list[dict]:
-        rows = self.conn().execute(f"SELECT {PUBLIC_COLUMNS} FROM documents ORDER BY id").fetchall()
+        rows = self.conn().execute(f"SELECT {PUBLIC_COLUMNS} FROM documents WHERE kind != 'web' ORDER BY id").fetchall()
         return [_decode(r) for r in rows]
 
     def stats(self) -> dict:
         rows = self.conn().execute(
             "SELECT kind, status, COUNT(*) AS n FROM documents GROUP BY kind, status"
         ).fetchall()
-        out = {"total": 0, "references": 0, "by_status": {}}
+        out = {"total": 0, "references": 0, "web_pages": 0, "by_status": {}}
         for r in rows:
             if r["kind"] == "reference":
                 out["references"] += r["n"]
+                continue
+            if r["kind"] == "web":
+                if r["status"] == "indexed":
+                    out["web_pages"] += r["n"]
                 continue
             out["total"] += r["n"]
             out["by_status"][r["status"]] = r["n"]
@@ -146,6 +168,28 @@ class Database:
         c.execute("DELETE FROM fingerprints WHERE doc_id = ?", (doc_id,))
         c.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         c.execute("COMMIT")
+
+    # ---- web sources ---------------------------------------------------
+    def cached_query(self, provider: str, query: str) -> list[dict] | None:
+        row = self.conn().execute(
+            "SELECT results FROM web_queries WHERE provider = ? AND query = ?", (provider, query)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def cache_query(self, provider: str, query: str, results: list[dict]) -> None:
+        self.conn().execute(
+            "INSERT OR REPLACE INTO web_queries (provider, query, results, created_at) VALUES (?, ?, ?, ?)",
+            (provider, query, json.dumps(results), now()))
+
+    def web_doc_by_url(self, url: str) -> dict | None:
+        row = self.conn().execute("SELECT id, kind, status FROM documents WHERE url = ?", (url,)).fetchone()
+        return dict(row) if row else None
+
+    def insert_web_doc(self, url: str, title: str, words: int, status: str, error: str | None = None) -> int:
+        cur = self.conn().execute(
+            "INSERT INTO documents (filename, stored_path, sha256, size_bytes, kind, status, decision_source, "
+            "words, error, url, created_at, processed_at) VALUES (?, '', '', 0, 'web', ?, 'auto', ?, ?, ?, ?, ?)",
+            ((title or url)[:255], status, words, error, url, now(), now()))
+        return int(cur.lastrowid)
 
     # ---- fingerprints --------------------------------------------------
     def store_fingerprints(self, doc_id: int, hashes: list[int]) -> None:
@@ -193,7 +237,7 @@ class Database:
         per_source = c.execute(
             "SELECT f.doc_id, COUNT(*) AS n FROM fingerprints f JOIN q ON q.hash = f.hash "
             "JOIN documents d ON d.id = f.doc_id "
-            "WHERE f.doc_id != ? AND (? OR d.id < ? OR d.kind = 'reference') "
+            "WHERE f.doc_id != ? AND (? OR d.id < ? OR d.kind IN ('reference', 'web')) "
             "GROUP BY f.doc_id HAVING n >= ? ORDER BY n DESC",
             (doc_id, 1 if compare_all else 0, doc_id, min_source_matches),
         ).fetchall()
@@ -211,13 +255,14 @@ class Database:
 
         sources = []
         for r in per_source[:top]:
-            meta = c.execute("SELECT filename, kind FROM documents WHERE id = ?", (r["doc_id"],)).fetchone()
+            meta = c.execute("SELECT filename, kind, url FROM documents WHERE id = ?", (r["doc_id"],)).fetchone()
             if meta is None:
                 continue
             sources.append({
                 "doc_id": r["doc_id"],
                 "filename": meta["filename"],
                 "kind": meta["kind"],
+                "url": meta["url"],
                 "shared_fingerprints": r["n"],
                 "pct": round(100.0 * r["n"] / total, 1),
             })

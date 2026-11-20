@@ -23,9 +23,11 @@ import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 
+from . import web_search
 from .analysis import analyze
 from .config import Settings
 from .db import Database, now
+from .plagiarism import fingerprints, tokenize
 
 log = logging.getLogger("integrity.worker")
 
@@ -52,6 +54,11 @@ class Pipeline:
         # Threads only wait on process futures, so a few more than the
         # process count keeps every worker busy.
         self.threads = ThreadPoolExecutor(max_workers=settings.workers * 2, thread_name_prefix="doc")
+        # Internet search is I/O-bound and rate limited, so it runs in its own
+        # pool and never blocks PDF extraction of the next files.
+        self.web_threads = ThreadPoolExecutor(max_workers=max(1, settings.web_concurrency), thread_name_prefix="web")
+        self.limiter = web_search.RateLimiter(settings.web_search_qps)
+        self._failed_urls: set[str] = set()
 
     def resume_pending(self) -> int:
         ids = self.db.pending_ids()
@@ -72,6 +79,7 @@ class Pipeline:
 
     def shutdown(self) -> None:
         self.threads.shutdown(wait=False, cancel_futures=True)
+        self.web_threads.shutdown(wait=False, cancel_futures=True)
         self.procs.shutdown(wait=False, cancel_futures=True)
 
     # ------------------------------------------------------------------
@@ -80,20 +88,20 @@ class Pipeline:
             self._run(doc_id, compare_all)
         except Exception as exc:  # never let one file kill the worker thread
             log.exception("processing failed for document %s", doc_id)
-            self.db.update(doc_id, status="error", error=f"Internal error: {exc}", processed_at=now())
+            self.db.update(doc_id, status="error", stage=None, error=f"Internal error: {exc}", processed_at=now())
 
     def _run(self, doc_id: int, compare_all: bool = False) -> None:
         doc = self.db.get(doc_id, full=True)
         if doc is None:
             return  # deleted while queued
-        self.db.update(doc_id, status="processing", error=None)
+        self.db.update(doc_id, status="processing", stage="extracting text", error=None)
 
         future = self.procs.submit(analyze, doc["stored_path"], doc["kind"], self.settings.analysis_options())
         try:
             result = future.result(timeout=self.settings.per_file_timeout_s)
         except FutureTimeout:
             future.cancel()
-            self.db.update(doc_id, status="error", processed_at=now(),
+            self.db.update(doc_id, status="error", stage=None, processed_at=now(),
                            error=f"Timed out after {self.settings.per_file_timeout_s}s")
             return
 
@@ -101,12 +109,88 @@ class Pipeline:
             return  # deleted while processing
 
         if not result["ok"]:
-            self.db.update(doc_id, status="error", error=result["error"], pages=0, words=0, processed_at=now())
+            self.db.update(doc_id, status="error", stage=None, error=result["error"], pages=0, words=0,
+                           processed_at=now())
             return
 
+        if self.settings.web_enabled and doc["kind"] == "submission" and not result.get("needs_review"):
+            self.db.update(doc_id, stage="searching the internet")
+            self.web_threads.submit(self._web_stage_safe, doc, result, compare_all)
+            return
+        self._complete(doc, result, compare_all, None)
+
+    def _complete(self, doc: dict, result: dict, compare_all: bool, web_info: dict | None) -> None:
         with self.index_lock:
-            self._finish(doc, result, compare_all)
+            if self.db.get(doc["id"]) is None:
+                return  # deleted meanwhile
+            self._finish(doc, result, compare_all, web_info)
             affected = self._affected_by(doc)
+        for other in affected:
+            self.threads.submit(self._rescore_safe, other)
+
+    # ---- internet search ---------------------------------------------
+    def _web_stage_safe(self, doc: dict, result: dict, compare_all: bool) -> None:
+        try:
+            web_info = self.web_check(result.get("queries") or [])
+            self._complete(doc, result, compare_all, web_info)
+        except Exception as exc:
+            log.exception("web stage failed for document %s", doc["id"])
+            self.db.update(doc["id"], status="error", stage=None, error=f"Internal error: {exc}", processed_at=now())
+
+    def web_check(self, queries: list[str]) -> dict:
+        """Search the web for `queries`, download and index the best-matching
+        pages. Returns a summary for the document's details."""
+        s = self.settings
+        info = {"provider": s.web_search, "queries": len(queries), "queries_failed": 0,
+                "errors": [], "pages": [], "failed_share": 0.0}
+        hits: dict[str, dict] = {}
+        for q in queries:
+            rows = self.db.cached_query(s.web_search, q)
+            if rows is None:
+                try:
+                    rows = web_search.search(q, s, self.limiter)
+                except web_search.SearchError as exc:
+                    info["queries_failed"] += 1
+                    if str(exc) not in info["errors"]:
+                        info["errors"].append(str(exc))
+                    continue
+                self.db.cache_query(s.web_search, q, rows)
+            for r in rows:
+                h = hits.setdefault(r["url"], {"title": r.get("title") or "", "hits": 0})
+                h["hits"] += 1
+        if queries:
+            info["failed_share"] = info["queries_failed"] / len(queries)
+
+        ranked = sorted(hits.items(), key=lambda kv: -kv[1]["hits"])[: s.web_max_pages_per_doc]
+        for url, meta in ranked:
+            page = {"url": url, "title": meta["title"], "query_hits": meta["hits"]}
+            existing = self.db.web_doc_by_url(url)
+            if existing:
+                page["status"] = "already indexed"
+            elif url in self._failed_urls:
+                page["status"] = "could not be downloaded"
+            else:
+                try:
+                    title, text = web_search.fetch_page(url, s)
+                    self._index_web_page(url, title or meta["title"], text)
+                    page["status"] = "downloaded"
+                except web_search.FetchError as exc:
+                    self._failed_urls.add(url)
+                    page["status"] = "could not be downloaded"
+                    log.info("fetch failed: %s", exc)
+            info["pages"].append(page)
+        return info
+
+    def _index_web_page(self, url: str, title: str, text: str) -> None:
+        s = self.settings
+        tokens = tokenize(text)
+        hashes = list(fingerprints(tokens, s.shingle_k, s.winnow_w))
+        with self.index_lock:
+            if self.db.web_doc_by_url(url):
+                return  # another thread got there first
+            web_id = self.db.insert_web_doc(url, title, len(tokens), "indexed")
+            self.db.store_fingerprints(web_id, hashes)
+            affected = self._affected_by({"id": web_id, "kind": "web"})
         for other in affected:
             self.threads.submit(self._rescore_safe, other)
 
@@ -118,7 +202,7 @@ class Pipeline:
         for o in self.db.overlapping_docs(doc["id"], self.settings.min_source_matches):
             if o["kind"] != "submission" or o["status"] not in ("accepted", "rejected"):
                 continue
-            if doc["kind"] == "reference" or o["id"] > doc["id"]:
+            if doc["kind"] in ("reference", "web") or o["id"] > doc["id"]:
                 out.append(o["id"])
         return out
 
@@ -144,11 +228,11 @@ class Pipeline:
                 fields["status"], fields["reasons"] = decide(plag_pct, doc["ai_pct"], s.reject_threshold)
             self.db.update(doc_id, **fields)
 
-    def _finish(self, doc: dict, result: dict, compare_all: bool = False) -> None:
+    def _finish(self, doc: dict, result: dict, compare_all: bool = False, web_info: dict | None = None) -> None:
         doc_id = doc["id"]
         s = self.settings
         hashes = result.get("fingerprints") or []
-        base = {"pages": result["pages"], "words": result["words"], "processed_at": now()}
+        base = {"pages": result["pages"], "words": result["words"], "processed_at": now(), "stage": None}
 
         if doc["kind"] == "reference":
             self.db.store_fingerprints(doc_id, hashes)
@@ -163,6 +247,8 @@ class Pipeline:
         match = self.db.match_fingerprints(doc_id, hashes, s.min_source_matches, compare_all=compare_all)
         plag_pct = round(100.0 * match["matched"] / match["total"], 1) if match["total"] else 0.0
         details = {"plagiarism": match}
+        if web_info is not None:
+            details["web"] = web_info
         dup = self.db.find_by_sha(doc["sha256"], doc_id)
         if dup:
             details["exact_duplicate_of"] = dup
@@ -170,13 +256,26 @@ class Pipeline:
         # Index this document so later uploads are compared against it.
         self.db.store_fingerprints(doc_id, hashes)
 
-        if "ai_error" in result:
-            self.db.update(doc_id, status="needs_review", decision_source="auto", plagiarism_pct=plag_pct,
-                           ai_pct=None, details=details, reasons=[result["ai_error"]], **base)
-            return
+        ai = result.get("ai")
+        ai_pct = ai["ai_pct"] if ai else None
+        if ai:
+            details["ai"] = ai
+        status, reasons = decide(plag_pct, ai_pct or 0.0, s.reject_threshold)
 
-        ai = result["ai"]
-        details["ai"] = ai
-        status, reasons = decide(plag_pct, ai["ai_pct"], s.reject_threshold)
+        # A rejection stands on the evidence found. An acceptance only stands
+        # if every check actually ran; otherwise a human has to look.
+        incomplete = []
+        if "ai_error" in result:
+            incomplete.append(result["ai_error"])
+        if web_info and web_info["failed_share"] > s.web_max_failed_share:
+            incomplete.append(
+                f"Internet search incomplete ({web_info['queries_failed']} of {web_info['queries']} queries "
+                f"failed): {'; '.join(web_info['errors'][:2])}")
+        if incomplete:
+            if status == "accepted":
+                status = "needs_review"
+                reasons = incomplete
+            else:
+                reasons = reasons + incomplete
         self.db.update(doc_id, status=status, decision_source="auto", plagiarism_pct=plag_pct,
-                       ai_pct=ai["ai_pct"], reasons=reasons, details=details, note=None, **base)
+                       ai_pct=ai_pct, reasons=reasons, details=details, note=None, **base)

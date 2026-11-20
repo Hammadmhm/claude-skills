@@ -9,6 +9,7 @@ from __future__ import annotations
 from . import ai_detect
 from .extract import ExtractionError, extract_text, strip_bibliography, strip_quotes
 from .plagiarism import fingerprints, tokenize
+from .web_search import select_queries
 
 
 def analyze(path: str, kind: str, opts: dict) -> dict:
@@ -34,6 +35,7 @@ def analyze(path: str, kind: str, opts: dict) -> dict:
     result["fingerprints"] = list(fingerprints(tokenize(plag_text), opts["shingle_k"], opts["winnow_w"]))
 
     if kind == "submission":
+        result["queries"] = select_queries(plag_text, opts.get("web_queries", 0))
         try:
             result["ai"] = ai_detect.detect(body, opts)
         except ai_detect.DetectorError as exc:

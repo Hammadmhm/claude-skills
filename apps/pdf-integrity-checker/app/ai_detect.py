@@ -68,6 +68,9 @@ def _sentences(text: str) -> list[str]:
     return [s for s in _SENT_SPLIT.split(flat) if len(_WORD.findall(s)) >= 3]
 
 
+split_sentences = _sentences
+
+
 def _segments(sentences: list[str]) -> list[list[str]]:
     segs: list[list[str]] = []
     cur: list[str] = []

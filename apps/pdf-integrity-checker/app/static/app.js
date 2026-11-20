@@ -78,7 +78,9 @@ drop.addEventListener("drop", (e) => uploadFiles(e.dataTransfer.files));
 
 // ---- table ------------------------------------------------------------
 function statusCell(d) {
-  return `<span class="pill ${d.status}">${label[d.status] || d.status}</span>${d.decision_source === "manual" ? '<span class="manual">manual</span>' : ""}`;
+  return `<span class="pill ${d.status}">${label[d.status] || d.status}</span>`
+    + (d.decision_source === "manual" ? '<span class="manual">manual</span>' : "")
+    + (d.stage && d.status === "processing" ? `<span class="stage">${esc(d.stage)}…</span>` : "");
 }
 function scoreCell(v) {
   const cls = v !== null && v !== undefined && v > state.threshold ? "over-limit" : "";
@@ -93,7 +95,7 @@ async function loadRows() {
   const { items, total } = await api(`/api/documents?${params}`);
   $("rows").innerHTML = items.map((d) => `
     <tr data-id="${d.id}">
-      <td class="file" title="${esc(d.filename)}">${esc(d.filename)}</td>
+      <td class="file" title="${esc(d.url || d.filename)}">${esc(d.filename)}</td>
       <td>${statusCell(d)}</td>
       ${scoreCell(d.plagiarism_pct)}${scoreCell(d.ai_pct)}
       <td class="num">${d.pages ?? "—"}</td>
@@ -115,6 +117,7 @@ async function loadStats() {
   $("s-rejected").textContent = b.rejected || 0;
   $("s-review").textContent = (b.needs_review || 0) + (b.error || 0);
   $("s-refs").textContent = s.references;
+  $("s-web").textContent = s.web_pages;
   return (b.queued || 0) + (b.processing || 0);
 }
 
@@ -156,6 +159,12 @@ async function openDetail(id) {
   const sources = det.plagiarism?.sources || [];
   const segs = det.ai?.flagged_segments || [];
   const isSub = d.kind === "submission";
+  const isWeb = d.kind === "web";
+  const web = det.web;
+  const srcLabel = (s) => s.kind === "web" ? "web page" : s.kind === "reference" ? "reference source" : "earlier submission";
+  const srcLink = (s) => s.kind === "web" && s.url
+    ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.filename)}</a>`
+    : `<a href="#" data-open="${s.doc_id}">${esc(s.filename)}</a>`;
   const done = !["queued", "processing"].includes(d.status);
 
   $("d-body").innerHTML = `
@@ -163,15 +172,24 @@ async function openDetail(id) {
     ${isSub ? `<div class="scores">
       <div class="score"><div class="muted">Plagiarism similarity</div><div class="v">${pct(d.plagiarism_pct)}</div>${meter(d.plagiarism_pct)}</div>
       <div class="score"><div class="muted">AI-generated likelihood (${esc(det.ai?.provider || "—")})</div><div class="v">${pct(d.ai_pct)}</div>${meter(d.ai_pct)}</div>
-    </div>` : `<p class="muted">Reference source — other uploads are compared against it; it is never accepted or rejected itself.</p>`}
+    </div>` : isWeb ? `<p class="muted">Web page found by internet search — submissions are compared against it.
+      <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.url)}</a></p>`
+      : `<p class="muted">Reference source — other uploads are compared against it; it is never accepted or rejected itself.</p>`}
     ${d.reasons?.length ? `<h3>Why</h3><ul class="reasons">${d.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
     ${d.error ? `<h3>Error</h3><p>${esc(d.error)}</p>` : ""}
     ${d.note ? `<h3>Reviewer note</h3><p>${esc(d.note)}</p>` : ""}
     ${det.exact_duplicate_of ? `<h3>Exact duplicate</h3><p>Byte-identical to <strong>${esc(det.exact_duplicate_of.filename)}</strong> (#${det.exact_duplicate_of.id}).</p>` : ""}
     ${isSub && done ? `<h3>Matching sources</h3>${sources.length ? `<ul class="list">${sources.map((s) => `
-        <li><strong>${pct(s.pct)}</strong> overlap with <a href="#" data-open="${s.doc_id}">${esc(s.filename)}</a>
-        <span class="muted">(${s.kind === "reference" ? "reference source" : "earlier submission"})</span></li>`).join("")}</ul>`
-      : `<p class="muted">No overlapping documents found in the index.</p>`}` : ""}
+        <li><strong>${pct(s.pct)}</strong> overlap with ${srcLink(s)}
+        <span class="muted">(${srcLabel(s)})</span></li>`).join("")}</ul>`
+      : `<p class="muted">No overlapping documents or web pages found.</p>`}` : ""}
+    ${web ? `<h3>Internet search</h3><p class="muted">Searched ${web.queries} exact phrases via ${esc(web.provider)}`
+        + `${web.queries_failed ? ` — <strong>${web.queries_failed} failed</strong>` : ""}; `
+        + `${web.pages.length} candidate page(s) checked.</p>`
+        + (web.pages.length ? `<ul class="list">${web.pages.map((p) => `<li><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.title || p.url)}</a>
+          <span class="muted">· came up in ${p.query_hits} of ${web.queries} searches · ${esc(p.status)}</span></li>`).join("")}</ul>` : "")
+        + (web.errors.length ? `<p class="muted">${web.errors.map(esc).join("<br>")}</p>` : "")
+      : isSub && done ? `<h3>Internet search</h3><p class="muted">Not run (internet search is turned off).</p>` : ""}
     ${segs.length ? `<h3>Passages flagged as AI-like</h3><ul class="list">${segs.map((s) => `
         <li><strong>${Math.round(s.probability * 100)}%</strong> <span class="muted">burstiness ${s.burstiness} · ${s.marker_hits} stock phrases</span>
         <div class="excerpt">${esc(s.excerpt)}</div></li>`).join("")}</ul>` : ""}
@@ -179,8 +197,9 @@ async function openDetail(id) {
       ${isSub && done ? `<textarea id="d-note" placeholder="Reviewer note (optional)">${esc(d.note || "")}</textarea>
         <button class="btn ok" data-act="accepted">Override: accept</button>
         <button class="btn bad" data-act="rejected">Override: reject</button>` : ""}
-      ${done ? `<button class="btn" data-act="recheck" title="Compare against every other document, including later uploads">Re-check</button>` : ""}
-      <a class="btn" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">Open PDF</a>
+      ${done && !isWeb ? `<button class="btn" data-act="recheck" title="Compare against every other document, including later uploads">Re-check</button>` : ""}
+      ${isWeb ? `<a class="btn" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Open page</a>`
+        : `<a class="btn" href="/api/documents/${d.id}/file" target="_blank" rel="noopener">Open PDF</a>`}
       <button class="btn bad" data-act="delete">Delete</button>
     </div>`;
 
@@ -210,6 +229,9 @@ async function openDetail(id) {
   const cfg = await api("/api/config");
   state.threshold = cfg.reject_threshold;
   $("rule").innerHTML = `Auto-reject above <strong>${cfg.reject_threshold}%</strong> plagiarism or AI`;
+  const names = { brave: "Brave", serper: "Google via Serper", searxng: "SearXNG" };
+  $("web-badge").textContent = cfg.web_search === "off" ? "Internet search off" : `Internet search: ${names[cfg.web_search] || cfg.web_search}`;
+  $("web-badge").classList.toggle("off", cfg.web_search === "off");
   $("drop-hint").textContent = `Up to ${cfg.max_file_mb} MB per file. Hundreds of files at once are fine — they upload in batches and are checked by ${cfg.workers} parallel workers.`;
   let working = await refresh();
   // Poll fast while work is in flight, slowly otherwise.

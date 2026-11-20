@@ -36,8 +36,9 @@ async def lifespan(app: FastAPI):
     app.state.db = Database(str(settings.db_path))
     app.state.pipeline = Pipeline(app.state.db, settings)
     resumed = app.state.pipeline.resume_pending()
-    log.info("ready: %d worker processes, threshold %.0f%%, AI detector=%s, resumed %d pending",
-             settings.workers, settings.reject_threshold, settings.ai_detector, resumed)
+    log.info("ready: %d worker processes, threshold %.0f%%, AI detector=%s, internet search=%s, resumed %d pending",
+             settings.workers, settings.reject_threshold, settings.ai_detector,
+             settings.web_search if settings.web_enabled else "off", resumed)
     yield
     app.state.pipeline.shutdown()
 
@@ -124,6 +125,7 @@ def get_config():
         "max_file_mb": settings.max_file_mb,
         "ai_detector": settings.ai_detector,
         "workers": settings.workers,
+        "web_search": settings.web_search if settings.web_enabled else "off",
     }
 
 
@@ -162,6 +164,8 @@ def get_document(request: Request, doc_id: int):
 @app.get("/api/documents/{doc_id}/file")
 def get_file(request: Request, doc_id: int):
     doc = _require(_db(request), doc_id, full=True)
+    if doc["kind"] == "web":
+        raise HTTPException(404, "Web sources have no stored file; open their URL instead")
     return FileResponse(doc["stored_path"], media_type="application/pdf", filename=doc["filename"])
 
 
@@ -186,6 +190,8 @@ def recheck(request: Request, doc_id: int):
     including ones uploaded after this one."""
     db = _db(request)
     doc = _require(db, doc_id)
+    if doc["kind"] == "web":
+        raise HTTPException(409, "Web sources cannot be re-checked")
     if doc["status"] in ("queued", "processing"):
         raise HTTPException(409, "Already being processed")
     db.clear_fingerprints(doc_id)

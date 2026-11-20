@@ -19,6 +19,10 @@ body { margin: 0; background: var(--bg); color: var(--text); font-size: 15px; li
 .top-inner { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 16px; flex-wrap: wrap; }
 h1 { margin: 0; font-size: 20px; }
 .sub { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; }
+.web-badge { padding: 6px 12px; border-radius: 999px; font-size: 14px; background: var(--work-bg); color: var(--work); }
+.web-badge.off { background: var(--warn-bg); color: var(--warn); }
+.stage { font-size: 11px; color: var(--muted); margin-left: 6px; }
 .rule { background: var(--bad-bg); color: var(--bad); padding: 6px 12px; border-radius: 999px; font-size: 14px; }
 main { padding: 20px 16px 40px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }

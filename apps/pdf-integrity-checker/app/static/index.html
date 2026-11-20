@@ -13,7 +13,10 @@
         <h1>PDF Integrity Checker</h1>
         <p class="sub">Plagiarism + AI-writing screening with automatic rejection</p>
       </div>
-      <div class="rule" id="rule">Auto-reject above <strong>30%</strong></div>
+      <div class="badges">
+        <div class="rule" id="rule">Auto-reject above <strong>30%</strong></div>
+        <div class="web-badge" id="web-badge"></div>
+      </div>
     </div>
   </header>
 
@@ -44,6 +47,7 @@
       <div class="stat bad"><span class="n" id="s-rejected">0</span><span class="l">Rejected</span></div>
       <div class="stat warn"><span class="n" id="s-review">0</span><span class="l">Needs review / error</span></div>
       <div class="stat"><span class="n" id="s-refs">0</span><span class="l">Reference sources</span></div>
+      <div class="stat"><span class="n" id="s-web">0</span><span class="l">Web pages indexed</span></div>
     </section>
 
     <section class="card">
@@ -56,6 +60,7 @@
           <button data-status="error">Errors</button>
           <button data-status="processing">In progress</button>
           <button data-kind="reference">References</button>
+          <button data-kind="web">Web pages</button>
         </div>
         <div class="toolbar-right">
           <input type="search" id="search" placeholder="Search filename…">
